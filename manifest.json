@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Testpad Peek for GitHub",
+  "version": "1.0.0",
+  "description": "Unwraps Testpad report links in GitHub comments, showing the failed tests inline.",
+  "content_scripts": [
+    {
+      "matches": ["*://github.com/*"],
+      "js": ["src/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "host_permissions": ["https://*.testpad.com/*"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

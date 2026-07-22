@@ -1,0 +1,12 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Local scratch / notes
+.claude/
+
+# Packaged extension output
+*.zip
