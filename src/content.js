@@ -29,6 +29,26 @@
     "P", "DIV", "SPAN", "UL", "OL", "LI", "SMALL", "SUP", "SUB",
   ]);
 
+  // Octicon paths, so the copy control looks like GitHub's own buttons.
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const ICON_COPY = [
+    "M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z",
+    "M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z",
+  ];
+  const ICON_CHECK = [
+    "M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z",
+  ];
+
+  // status -> [badge text, Primer class, markdown text]
+  const STATUS = {
+    fail: ["FAIL", "Label--danger", "FAIL"],
+    pass: ["PASS", "Label--success", "PASS"],
+    blocked: ["BLOCKED", "Label--secondary", "BLOCKED"],
+    query: ["QUERY", "Label--accent", "QUERY"],
+    skip: ["SKIPPED", "Label--secondary", "SKIPPED"],
+    other: ["—", "Label--secondary", "NOT RUN"],
+  };
+
   // ---- discovery -----------------------------------------------------------
 
   function scan(root) {
@@ -156,14 +176,20 @@
 
   function render(host, html, href) {
     const doc = new DOMParser().parseFromString(html, "text/html");
-    const origin = new URL(href).origin;
+    const ctx = linkContext(href);
 
     const title =
       (doc.querySelector(".heading h1")?.textContent || "").trim() ||
       (doc.title || "").replace(/^TESTPAD REPORT\s*\|?\s*/i, "").trim() ||
       "Testpad report";
 
-    const tests = extractTests(doc);
+    // A skipped test is an explicit "deliberately not run" marker — Testpad
+    // itself leaves it out of the run totals, so drop it here too rather than
+    // surfacing it as an unexplained non-passing row.
+    const all = extractTests(doc);
+    const tests = all.filter((t) => t.status !== "skip");
+    const skipped = all.length - tests.length;
+
     // Surface everything that isn't a clean pass: fails, blocked, query, and
     // any other non-pass state. Ordered so fails come first.
     const passed = tests.filter((t) => t.status === "pass");
@@ -179,10 +205,18 @@
       other: tests.filter((t) => !["pass", "fail", "blocked", "query"].includes(t.status)).length,
     };
 
-    host.replaceChildren(header(href, title, counts));
+    // No tests means nothing to put on the clipboard — no copy button, same as
+    // the error state.
+    const getMarkdown = tests.length
+      ? () => reportMarkdown(title, href, notPassed, counts, ctx)
+      : null;
+    host.replaceChildren(header(href, title, counts, getMarkdown));
 
     if (!tests.length) {
-      host.appendChild(row("No tests found in this report.", "color-fg-muted"));
+      const msg = skipped
+        ? "No tests were run in this report."
+        : "No tests found in this report.";
+      host.appendChild(row(msg, "color-fg-muted"));
       return;
     }
 
@@ -190,7 +224,7 @@
       host.appendChild(row("✅ All " + passed.length + " tests passed.", "color-fg-muted"));
     }
 
-    notPassed.forEach((t) => host.appendChild(issueRow(t, origin)));
+    notPassed.forEach((t) => host.appendChild(issueRow(t, ctx)));
 
     // A quiet, collapsed list of the passing tests (titles only).
     if (passed.length) {
@@ -215,7 +249,8 @@
     }
   }
 
-  function header(href, title, counts) {
+  // `getMarkdown` is omitted in the error state, where there's nothing to copy.
+  function header(href, title, counts, getMarkdown) {
     const h = document.createElement("div");
     h.className = "Box-header d-flex flex-items-center";
     h.style.cssText = "gap:8px;flex-wrap:wrap;";
@@ -245,17 +280,85 @@
     spacer.className = "flex-auto";
     h.appendChild(spacer);
 
-    const open = document.createElement("a");
-    open.textContent = "Open full report ↗";
-    open.href = href;
-    open.target = "_blank";
-    open.rel = "noopener noreferrer";
-    open.style.fontSize = "12px";
-    h.appendChild(open);
+    if (getMarkdown) h.appendChild(copyButton(getMarkdown));
     return h;
   }
 
-  function issueRow(t, origin) {
+  // Copies the failed tests as Markdown. Feedback is the icon itself flipping
+  // to a check, the way GitHub's own copy buttons behave.
+  function copyButton(getMarkdown) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn-octicon";
+    btn.style.cssText = "flex:none;padding:2px;margin:0;line-height:0;background:none;border:0;cursor:pointer;";
+    setCopyState(btn, "idle");
+
+    let timer = null;
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      copyText(getMarkdown()).then((ok) => {
+        setCopyState(btn, ok ? "copied" : "failed");
+        clearTimeout(timer);
+        timer = setTimeout(() => setCopyState(btn, "idle"), 2000);
+      });
+    });
+    return btn;
+  }
+
+  function setCopyState(btn, state) {
+    const [paths, tip, cls] = {
+      idle: [ICON_COPY, "Copy non-passing tests as Markdown", ""],
+      copied: [ICON_CHECK, "Copied!", "color-fg-success"],
+      failed: [ICON_COPY, "Copy failed — check clipboard permissions", "color-fg-danger"],
+    }[state];
+    btn.className = ("btn-octicon " + cls).trim();
+    btn.title = tip;
+    btn.setAttribute("aria-label", tip);
+    btn.replaceChildren(icon(paths));
+  }
+
+  function icon(paths) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "16");
+    svg.setAttribute("height", "16");
+    svg.setAttribute("fill", "currentColor");
+    svg.setAttribute("aria-hidden", "true");
+    paths.forEach((d) => {
+      const p = document.createElementNS(SVG_NS, "path");
+      p.setAttribute("d", d);
+      svg.appendChild(p);
+    });
+    return svg;
+  }
+
+  // The async Clipboard API needs a focused document and can be unavailable in
+  // a content script; fall back to the legacy selection-based copy.
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) { /* fall through */ }
+    const ta = document.createElement("textarea");
+    try {
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
+      document.body.appendChild(ta);
+      ta.select();
+      return document.execCommand("copy");
+    } catch (_) {
+      return false;
+    } finally {
+      // Never leave the payload (auth token and all) sitting in GitHub's DOM.
+      ta.remove();
+    }
+  }
+
+  function issueRow(t, ctx) {
     const r = document.createElement("div");
     r.className = "Box-row";
 
@@ -282,7 +385,7 @@
     r.appendChild(head);
 
     if (t.cell) {
-      const notes = buildNotes(t.cell, origin);
+      const notes = buildNotes(t.cell, ctx);
       if (notes) r.appendChild(notes);
     }
     return r;
@@ -291,9 +394,9 @@
   // Build the notes block: screenshots/thumbnails are pulled into their own
   // strip so the notes text starts on a clean new line below them, instead of
   // wrapping around the images with a ragged left edge.
-  function buildNotes(cell, origin) {
+  function buildNotes(cell, ctx) {
     const scratch = document.createElement("div");
-    sanitizeInto(scratch, cell, origin);
+    sanitizeInto(scratch, cell, ctx);
 
     // Collect media: inline thumbnails (kept in their wrapping link if any) and
     // the "🖼 image" placeholders/links for CSP-blocked images. Skip anything
@@ -410,6 +513,7 @@
     if (cl.contains("pass")) return "pass";
     if (cl.contains("blocked")) return "blocked";
     if (cl.contains("query")) return "query";
+    if (cl.contains("skip")) return "skip";
     return "other";
   }
 
@@ -419,7 +523,7 @@
   // tags/attributes. Every href is scheme-checked; images become plain links
   // (GitHub's CSP blocks testpad.com images anyway); scripts/styles and inline
   // event handlers are dropped. `inAnchor` prevents nesting a link inside a link.
-  function sanitizeInto(target, source, origin, inAnchor, depth) {
+  function sanitizeInto(target, source, ctx, inAnchor, depth) {
     depth = depth || 0;
     if (depth > 50) {
       // Pathologically deep markup — bail to plain text rather than recurse.
@@ -445,44 +549,73 @@
         } else if (inAnchor) {
           target.appendChild(imagePlaceholder());
         } else {
-          target.appendChild(imageLink(src, origin));
+          target.appendChild(imageLink(src, ctx));
         }
         return;
       }
       if (tag === "SCRIPT" || tag === "STYLE") return;
 
       if (tag === "A") {
-        const href = safeHref(node.getAttribute("href"), origin);
+        const href = safeHref(node.getAttribute("href"), ctx);
         if (href) {
           const a = document.createElement("a");
           a.href = href;
           a.target = "_blank";
           a.rel = "noopener noreferrer";
-          sanitizeInto(a, node, origin, true, depth + 1);
+          sanitizeInto(a, node, ctx, true, depth + 1);
           target.appendChild(a);
         } else {
           // Disallowed scheme (javascript:, data:text, …) — drop the link,
           // keep its text.
-          sanitizeInto(target, node, origin, inAnchor, depth + 1);
+          sanitizeInto(target, node, ctx, inAnchor, depth + 1);
         }
         return;
       }
 
       if (INLINE_TAGS.has(tag)) {
         const clean = document.createElement(tag.toLowerCase());
-        sanitizeInto(clean, node, origin, inAnchor, depth + 1);
+        sanitizeInto(clean, node, ctx, inAnchor, depth + 1);
         target.appendChild(clean);
       } else {
         // Unknown wrapper: keep its contents, drop the element itself.
-        sanitizeInto(target, node, origin, inAnchor, depth + 1);
+        sanitizeInto(target, node, ctx, inAnchor, depth + 1);
       }
     });
   }
 
+  // The report URL's `auth` token is what makes a guest report readable, and it
+  // gates the report's attachments too. Carry it in the context so every
+  // Testpad-hosted link we emit stays openable by someone who isn't signed in.
+  function linkContext(href) {
+    let origin = "";
+    let auth = "";
+    try {
+      const u = new URL(href);
+      origin = u.origin;
+      auth = u.searchParams.get("auth") || "";
+    } catch (_) { /* leave both empty — links stay as-is */ }
+    return { origin, auth };
+  }
+
   // Returns a safe absolute URL, or "" if the scheme isn't allowed.
-  function safeHref(raw, origin) {
-    const href = absUrl(raw, origin);
-    return /^(https?:|mailto:)/i.test(href) ? href : "";
+  function safeHref(raw, ctx) {
+    const href = absUrl(raw, ctx.origin);
+    return /^(https?:|mailto:)/i.test(href) ? withAuth(href, ctx) : "";
+  }
+
+  // Append the report's auth token — but only to URLs on the report's own
+  // origin, so the token never rides along to a third-party host linked from
+  // the notes. URLs that already carry an `auth` are left alone.
+  function withAuth(href, ctx) {
+    if (!ctx.auth) return href;
+    try {
+      const u = new URL(href);
+      if (u.origin !== ctx.origin || u.searchParams.has("auth")) return href;
+      u.searchParams.set("auth", ctx.auth);
+      return u.href;
+    } catch (_) {
+      return href;
+    }
   }
 
   function thumbImg(src, alt) {
@@ -501,8 +634,8 @@
     return s;
   }
 
-  function imageLink(src, origin) {
-    const href = safeHref(src, origin);
+  function imageLink(src, ctx) {
+    const href = safeHref(src, ctx);
     if (!href) return imagePlaceholder(); // unsafe src → non-clickable placeholder
     const a = document.createElement("a");
     a.href = href;
@@ -511,6 +644,177 @@
     a.textContent = "🖼 image";
     a.style.fontSize = "12px";
     return a;
+  }
+
+  // ---- markdown ------------------------------------------------------------
+
+  // Two sentinels, stripped by tidy(): NUL brackets a verbatim block that must
+  // survive the whitespace/escaping pass, SOH guards a list bullet we emitted
+  // ourselves so it isn't escaped as if it were the tester's prose.
+  const MD_BLOCK = "\u0000";
+  const MD_BULLET = "\u0001";
+
+  // The clipboard payload: just the tests that didn't pass, with their notes.
+  // Attachments come through as real image embeds (auth token attached), so a
+  // pasted report renders its screenshots for anyone — signed in or not.
+  function reportMarkdown(title, href, tests, counts, ctx) {
+    const summary = [
+      counts.fail && counts.fail + " failed",
+      counts.blocked && counts.blocked + " blocked",
+      counts.query && counts.query + " query",
+      counts.other && counts.other + " other",
+    ].filter(Boolean).join(", ");
+
+    const out = ["**[" + mdEscape(title) + "](" + href + ")**" +
+      (summary ? " — " + summary : "") +
+      " (" + counts.total + " test" + (counts.total === 1 ? "" : "s") + ")"];
+
+    // Only reachable with tests on the report — the button isn't offered
+    // otherwise — so an empty list here really does mean everything passed.
+    if (!tests.length) out.push("", "✅ All " + counts.total + " tests passed.");
+
+    tests.forEach((t) => {
+      out.push("", "**" + (STATUS[t.status] || STATUS.other)[2] + "** — " + mdEscape(titleText(t)));
+      const notes = t.cell ? mdCell(t.cell, ctx) : "";
+      if (notes) out.push("", notes);
+    });
+
+    return out.join("\n") + "\n";
+  }
+
+  function mdCell(cell, ctx) {
+    const blocks = [];  // verbatim chunks (code fences) held out of the tidy pass
+    return tidy(mdFrom(cell, ctx, blocks, 0), blocks);
+  }
+
+  // Notes markup -> Markdown. Follows the same whitelist as the sanitizer:
+  // known inline tags are translated, anything else contributes its contents.
+  function mdFrom(node, ctx, blocks, depth) {
+    if (depth > 50) return mdEscape(node.textContent || "");
+
+    let out = "";
+    node.childNodes.forEach((n) => {
+      if (n.nodeType === 3) { out += mdEscape(n.nodeValue); return; }
+      if (n.nodeType !== 1) return;
+
+      const tag = n.tagName;
+      const inner = () => mdFrom(n, ctx, blocks, depth + 1);
+
+      switch (tag) {
+        case "SCRIPT": case "STYLE": break;
+        case "BR": out += "\n"; break;
+        case "IMG": out += mdMedia(n.getAttribute("src"), n.getAttribute("alt"), ctx); break;
+        case "A": out += mdAnchor(n, ctx, blocks, depth); break;
+        case "B": case "STRONG": out += wrap(inner(), "**"); break;
+        case "I": case "EM": out += wrap(inner(), "*"); break;
+        case "S": out += wrap(inner(), "~~"); break;
+        case "CODE": out += wrap(inner(), "`"); break;
+        case "PRE": out += "\n\n" + hold(blocks, fence(n.textContent)) + "\n\n"; break;
+        case "LI": out += "\n" + MD_BULLET + "- " + inner().trim(); break;
+        case "UL": case "OL": out += "\n" + inner() + "\n"; break;
+        case "P": case "DIV": out += "\n\n" + inner() + "\n\n"; break;
+        default: out += inner();
+      }
+    });
+    return out;
+  }
+
+  // HTML whitespace is insignificant, but the newlines inside a note are how
+  // the tester laid it out, so those are kept.
+  function tidy(s, blocks) {
+    return s
+      .replace(/[ \t]+/g, " ")
+      .replace(/ ?\n ?/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      // A note that opens a line with "1." or "-" is a tester numbering their
+      // steps, not Markdown: left alone, GFM renumbers those steps and swallows
+      // the following line into the list. Escape the marker so it stays prose.
+      .replace(/^([ \t]*)(\d{1,9})([.)])(?=[ \t])/gm, "$1$2\\$3")
+      .replace(/^([ \t]*)([-+#])(?=[ \t])/gm, "$1\\$2")
+      .split(MD_BULLET).join("")
+      .replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[Number(i)])
+      .trim();
+  }
+
+  function hold(blocks, verbatim) {
+    return MD_BLOCK + (blocks.push(verbatim) - 1) + MD_BLOCK;
+  }
+
+  // Fence with one more backtick than the longest run inside, so a note that
+  // itself contains ``` can't break out and swallow the rest of the paste.
+  function fence(code) {
+    const body = (code || "").replace(/\s+$/, "");
+    const longest = (body.match(/`+/g) || []).reduce((n, r) => Math.max(n, r.length), 0);
+    const bar = "`".repeat(Math.max(3, longest + 1));
+    return bar + "\n" + body + "\n" + bar;
+  }
+
+  // Images sit on their own line, mirroring the media strip in the rendered box.
+  function ownLine(md) {
+    return md ? "\n\n" + md + "\n\n" : "";
+  }
+
+  function mdAnchor(a, ctx, blocks, depth) {
+    const raw = a.getAttribute("href");
+    const href = safeHref(raw, ctx);
+    const img = a.querySelector("img");
+
+    // Testpad wraps an attachment's data: thumbnail in a link to the full-size
+    // upload — that link is the only usable URL, so embed it as the image.
+    if (href && img) return mdMedia(href, img.getAttribute("alt"), ctx);
+
+    const inner = mdFrom(a, ctx, blocks, depth + 1).trim();
+    if (!href) return inner;                     // disallowed scheme — keep the text
+    if (!inner) return href;
+    // Testpad usually labels a link with the URL itself; leave those bare so
+    // GitHub autolinks them instead of producing [url](url). Compare on the raw
+    // text, since `inner` has been markdown-escaped by now.
+    const label = text(a);
+    return (label === raw || label === href) ? href : "[" + inner + "](" + href + ")";
+  }
+
+  // Only the report's own attachments are embedded as images. Anything else on
+  // a foreign host degrades to a link, the same as the rendered box does —
+  // auto-loading a third party's image into whatever comment this gets pasted
+  // into isn't ours to decide. A data: thumbnail has no URL to point at, so it
+  // drops out entirely (inlining kilobytes of base64 would be worse than
+  // useless).
+  function mdMedia(src, alt, ctx) {
+    const href = safeHref(src, ctx);
+    if (!href) return "";
+    const name = mdEscape(alt || fileName(href));
+    return sameOrigin(href, ctx)
+      ? ownLine("![" + name + "](" + href + ")")
+      : "[🖼 " + name + "](" + href + ")";
+  }
+
+  function sameOrigin(href, ctx) {
+    if (!ctx.origin) return false;
+    try { return new URL(href).origin === ctx.origin; } catch (_) { return false; }
+  }
+
+  function fileName(href) {
+    try {
+      const parts = new URL(href).pathname.split("/").filter(Boolean);
+      return decodeURIComponent(parts[parts.length - 1] || "image");
+    } catch (_) {
+      return "image";
+    }
+  }
+
+  // Wrap in an emphasis marker without swallowing the spaces around it —
+  // "**expected** :" must not become "** expected**:".
+  function wrap(s, marker) {
+    const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(s);
+    return m[2] ? m[1] + marker + m[2] + marker + m[3] : s;
+  }
+
+  // Control characters go first, so note text can't smuggle in one of the
+  // sentinels tidy() relies on.
+  function mdEscape(s) {
+    return (s || "")
+      .replace(/[\u0000-\u0008\u000b-\u001f]/g, "")
+      .replace(/([\\`*_[\]<>])/g, "\\$1");
   }
 
   // ---- small UI helpers ----------------------------------------------------
@@ -537,14 +841,7 @@
   }
 
   function statusBadge(status) {
-    const map = {
-      fail: ["FAIL", "Label--danger"],
-      pass: ["PASS", "Label--success"],
-      blocked: ["BLOCKED", "Label--secondary"],
-      query: ["QUERY", "Label--accent"],
-      other: ["—", "Label--secondary"],
-    };
-    const [txt, cls] = map[status] || map.other;
+    const [txt, cls] = STATUS[status] || STATUS.other;
     const s = label(txt, cls);
     s.style.flex = "none";
     return s;
