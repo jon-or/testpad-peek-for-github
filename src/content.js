@@ -10,9 +10,12 @@
 
   // Matches links like:
   //   https://ownerrez.testpad.com/script/46/report/T?auth=2815afda...
-  // i.e. any *.testpad.com URL whose path contains "/report/". HTTPS only —
-  // the report URL carries an auth token we don't want traversing cleartext.
-  const REPORT_RE = /^https:\/\/[a-z0-9-]+\.testpad\.com\/.*\/report\//i;
+  //   https://ownerrez.testpad.com/script/52/report?auth=112aea9d...
+  // i.e. any *.testpad.com URL with a "/report" path segment — which may end the
+  // path, so the query string has to be allowed to follow it directly. HTTPS
+  // only — the report URL carries an auth token we don't want traversing
+  // cleartext.
+  const REPORT_RE = /^https:\/\/[a-z0-9-]+\.testpad\.com\/.*\/report(?:[/?#]|$)/i;
 
   const PROCESSED = "data-testpad-peek"; // marks anchors we've already handled
   const inflight = new Map();            // url -> Promise<{ok, html|error}>
@@ -121,6 +124,23 @@
     return inflight.get(url);
   }
 
+  // Testpad's report path takes an optional trailing flag segment, and "T" is
+  // the one that asks for attachment thumbnails at full size — a bare /report
+  // serves the same inlined image data at height="15". We ignore the reported
+  // height either way, so this is about asking for the view we actually want
+  // rather than fixing a missing image. Normalizes the *fetched* URL only; the
+  // link shown in the peek stays the one that was posted.
+  function withThumbnails(href) {
+    try {
+      const u = new URL(href);
+      if (!/\/report\/?$/i.test(u.pathname)) return href; // already flagged
+      u.pathname = u.pathname.replace(/\/report\/?$/i, "/report/T");
+      return u.href;
+    } catch (_) {
+      return href; // unparseable — fetch it as-is and let the worker judge
+    }
+  }
+
   function unwrap(anchor) {
     const host = box();
     host.classList.add("testpad-peek");
@@ -130,7 +150,7 @@
     insertPeek(host, anchor);
     hosts.set(anchor, host);
 
-    fetchReport(anchor.href)
+    fetchReport(withThumbnails(anchor.href))
       .then((res) => {
         if (!res.ok) {
           showError(host, anchor.href, "Testpad Peek: " + res.error);
